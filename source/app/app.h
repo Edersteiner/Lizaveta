@@ -40,12 +40,17 @@ typedef struct {
 
 /* A quick link in the sidebar: the label shown and the path it navigates to.
  * `dev` is the underlying block device for device entries; it is empty for
- * pinned entries. `icon` is the freedesktop icon name to draw beside the
- * label. */
+ * pinned entries and for GVFS-backed devices (phones), which carry their
+ * activation URI in `uri` instead (e.g. mtp://[usb:001,006]). `mounted`
+ * drives both the dimmed presentation of not-yet-mounted volumes and which
+ * action the context menu offers (Mount vs Safely remove). `icon` is the
+ * freedesktop icon name to draw beside the label. */
 typedef struct {
     char label[LIZ_FS_NAME_MAX];
     char path[PATH_MAX];
     char dev[64];
+    char uri[128];
+    bool mounted;
     char icon[64];
 } liz_sidebar_entry;
 
@@ -58,6 +63,7 @@ typedef struct {
     liz_sidebar_entry devices[LIZ_SIDEBAR_DEVICES_MAX];
     int devices_count;
     int hover_item; /* flattened index into pinned+devices, -1 when none */
+    double devices_checked_at; /* last device rescan time (throttles sysfs walks) */
 } liz_sidebar_state;
 
 #define LIZ_NAV_TEXT_MAX PATH_MAX
@@ -132,6 +138,7 @@ typedef enum {
     LIZ_MENU_NEW_FOLDER,
     LIZ_MENU_TOGGLE_HIDDEN,
     LIZ_MENU_UNMOUNT,
+    LIZ_MENU_MOUNT,
     LIZ_MENU_OPEN_NEW_WINDOW,
     LIZ_MENU_TOGGLE_SIDEBAR,
     LIZ_MENU_EXTRACT_HERE,
@@ -376,6 +383,15 @@ void liz_app_open_new_window(liz_app* app, const char* path);
 /* Safely unmounts a device: udisksctl when its block device is known,
  * plain umount on the mount point as a fallback. Detached from the app. */
 void liz_app_unmount_device(liz_app* app, const char* dev, const char* mountpoint);
+
+/* Mounts a sidebar device entry: block devices through udisksctl, GVFS
+ * devices (phones) through `gio mount`. Detached from the app; once the
+ * mount completes the file manager navigates to the new location. */
+void liz_app_mount_device(liz_app* app, const liz_sidebar_entry* e);
+
+/* Unmounts a GVFS-backed device (phone) by its activation URI. Detached
+ * from the app. */
+void liz_app_unmount_uri(liz_app* app, const char* uri);
 
 /* Navigates to the parent of the current directory. */
 void liz_app_go_parent(liz_app* app);

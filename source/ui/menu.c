@@ -117,11 +117,15 @@ void liz_menu_open_sidebar(liz_app* app, int x, int y, int index, bool is_device
     m->sidebar_index = index;
     m->sidebar_is_device = is_device;
 
-    /* only real block devices can be unmounted; the "File system" root
-     * entry is just a navigation shortcut */
-    if (is_device && index >= 0 && index < app->sidebar.devices_count
-        && app->sidebar.devices[index].dev[0] != '\0')
-        liz_menu_add(m, LIZ_MENU_UNMOUNT, "Safely remove");
+    /* block devices mount/unmount through udisks, GVFS devices (phones)
+     * through gio; the "File system" root entry is just a navigation
+     * shortcut */
+    if (is_device && index >= 0 && index < app->sidebar.devices_count) {
+        const liz_sidebar_entry* e = &app->sidebar.devices[index];
+        if (e->dev[0] != '\0' || e->uri[0] != '\0')
+            liz_menu_add(m, e->mounted ? LIZ_MENU_UNMOUNT : LIZ_MENU_MOUNT,
+                         e->mounted ? "Safely remove" : "Mount");
+    }
     liz_menu_add(m, LIZ_MENU_OPEN_NEW_WINDOW, "Open in new window");
     liz_menu_add(m, LIZ_MENU_TOGGLE_SIDEBAR,
                 app->sidebar_visible ? "Hide panel" : "Show panel");
@@ -245,8 +249,18 @@ static void liz_menu_run(liz_app* app, const liz_menu_item* item)
         break;
     case LIZ_MENU_UNMOUNT: {
         const liz_sidebar_entry* e = liz_menu_sidebar_entry(app);
+        if (e) {
+            if (e->uri[0])
+                liz_app_unmount_uri(app, e->uri);
+            else
+                liz_app_unmount_device(app, e->dev, e->path);
+        }
+        break;
+    }
+    case LIZ_MENU_MOUNT: {
+        const liz_sidebar_entry* e = liz_menu_sidebar_entry(app);
         if (e)
-            liz_app_unmount_device(app, e->dev, e->path);
+            liz_app_mount_device(app, e);
         break;
     }
     case LIZ_MENU_OPEN_NEW_WINDOW: {

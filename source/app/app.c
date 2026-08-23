@@ -648,6 +648,120 @@ void liz_app_unmount_device(liz_app* app, const char* dev, const char* mountpoin
     _exit(0);
 }
 
+/* Unmounts a GVFS-backed device (MTP phone, PTP camera). The gvfs fuse
+ * tree cannot be unmounted with umount(8); gio tells the owning backend,
+ * which powers the device down safely. Detached from the app. */
+void liz_app_unmount_uri(liz_app* app, const char* uri)
+{
+    (void)app;
+    if (!uri || !uri[0])
+        return;
+    if (!liz_app_detach())
+        return;
+    execlp("gio", "gio", "mount", "-u", uri, (char*)NULL);
+    _exit(127);
+}
+
+/* Where liz_app_mount_device stashes its result for liz_app_poll_mount to
+ * pick up once the detached mount process has finished. */
+static char g_mount_temp[PATH_MAX];
+
+/* Mounts a sidebar device entry: block devices through udisksctl (which
+ * also asks udisks for the chosen mount point), GVFS devices such as MTP
+ * phones through `gio mount`. Detached like the unmount path; the target
+ * location is written to a temp file that the render loop polls so the
+ * file manager can navigate there once the mount completes. */
+void liz_app_mount_device(liz_app* app, const liz_sidebar_entry* e)
+{
+    (void)app;
+    if (!e)
+        return;
+    bool block = e->dev[0] != '\0';
+    if (!block && e->uri[0] == '\0')
+        return;
+
+    snprintf(g_mount_temp, sizeof(g_mount_temp), "/tmp/lizaveta-mount-XXXXXX");
+    int fd = mkstemp(g_mount_temp);
+    if (fd < 0) {
+        g_mount_temp[0] = '\0';
+        return;
+    }
+    /* line 1: where to navigate afterwards -- empty for block devices,
+     * whose location is parsed from udisksctl's output instead */
+    dprintf(fd, "%s\n", block ? "" : e->path);
+    close(fd);
+
+    if (!liz_app_detach())
+        return;
+
+    /* detach() pointed stdout at /dev/null; append it to the result file
+     * so poll_mount can read both the hint and the tool's output */
+    int out = open(g_mount_temp, O_WRONLY | O_APPEND);
+    if (out >= 0) {
+        dup2(out, STDOUT_FILENO);
+        dup2(out, STDERR_FILENO);
+        close(out);
+    }
+
+    if (block)
+        execlp("udisksctl", "udisksctl", "mount", "-b", e->dev, (char*)NULL);
+    execlp("gio", "gio", "mount", e->uri, (char*)NULL);
+    _exit(127);
+}
+
+/* Navigates to the location a finished liz_app_mount_device reported:
+ * either the GVFS path recorded up front or the "Mounted <dev> at <path>"
+ * mount point from udisksctl's output. Failures leave nothing to parse and
+ * simply clean up. */
+static void liz_app_poll_mount(liz_app* app)
+{
+    if (g_mount_temp[0] == '\0')
+        return;
+    struct stat st;
+    if (stat(g_mount_temp, &st) != 0 || st.st_size == 0)
+        return;
+
+    FILE* f = fopen(g_mount_temp, "r");
+    char dest[PATH_MAX];
+    dest[0] = '\0';
+    if (f) {
+        char hint[PATH_MAX];
+        if (fgets(hint, sizeof(hint), f)) {
+            hint[strcspn(hint, "\r\n")] = '\0';
+            if (hint[0] != '\0')
+                snprintf(dest, sizeof(dest), "%s", hint);
+        }
+        if (dest[0] == '\0') {
+            char* buf = malloc((size_t)st.st_size + 1);
+            if (buf) {
+                size_t got = fread(buf, 1, (size_t)st.st_size, f);
+                buf[got] = '\0';
+                /* udisksctl prints "Mounted <dev> at <path>."; only the
+                 * sentence-final dot is stripped, never dots inside the
+                 * mount point itself */
+                char* at = strstr(buf, " at ");
+                if (at) {
+                    at += 4;
+                    at[strcspn(at, "\r\n")] = '\0';
+                    size_t len = strlen(at);
+                    if (len > 0 && at[len - 1] == '.')
+                        at[len - 1] = '\0';
+                    snprintf(dest, sizeof(dest), "%s", at);
+                }
+                free(buf);
+            }
+        }
+        fclose(f);
+    }
+
+    unlink(g_mount_temp);
+    g_mount_temp[0] = '\0';
+
+    struct stat dst;
+    if (dest[0] != '\0' && stat(dest, &dst) == 0 && S_ISDIR(dst.st_mode))
+        liz_app_navigate(app, dest);
+}
+
 void liz_app_go_parent(liz_app* app)
 {
 #ifdef ARCHIVE_SUPPORT
@@ -1660,6 +1774,9 @@ void liz_app_render(liz_app* app)
 #ifdef ARCHIVE_SUPPORT
     liz_app_poll_extract(app);
 #endif
+
+    /* pick up locations reported by finished mount operations */
+    liz_app_poll_mount(app);
 
     /* keep the embedded preview pane in step with the selection */
     liz_preview_sync(app);
